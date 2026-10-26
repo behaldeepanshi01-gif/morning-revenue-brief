@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.streamlit/secrets.toml
+.env
+.DS_Store
+# Raw data stays local (large file); keep it next to app.py
+hotel_bookings.csv
