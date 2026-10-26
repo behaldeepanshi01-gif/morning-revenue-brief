@@ -23,7 +23,7 @@ Every morning a GM wants to know three things: how did we do, how does that comp
 4. The biggest risk
 5. One recommended action
 
-The brief is written by simple rules, so it works for free. If you add an Anthropic API key, a checkbox lets Claude write it instead. If the key is missing or the call fails, the app quietly falls back to the rule-based version.
+Optional: Claude can write the brief when an API key is set. The rule-based brief works without one. If the key is missing or the call fails, the app quietly falls back to the rule-based version.
 
 ## How I checked the numbers
 
@@ -48,9 +48,14 @@ The recommendation depends on how full the hotel is, not just on how today compa
 
 The same rules are given to Claude, and the app also checks its answer. If it recommends discounting a nearly full hotel, that answer is thrown away and the rule-based brief is used.
 
-## Data and assumptions
+## Data
 
-- **Source:** the Kaggle *Hotel Booking Demand* dataset: about 119,000 bookings from 2015 to 2017 at two Portuguese hotels, a city hotel and a resort. This is historical data, so "today" is a date you pick.
+The data comes from a city hotel and a resort hotel in Portugal: about 119,000 bookings from 2015 to 2017. It is historical, so "today" is a date you pick. Source: [Hotel Booking Demand on Kaggle](https://www.kaggle.com/datasets/jessemostipak/hotel-booking-demand).
+
+> Antonio, N., de Almeida, A., and Nunes, L. (2019). "Hotel booking demand datasets." *Data in Brief*, 22, 41–49.
+
+## Assumptions
+
 - **Room count:** the data doesn't include one. I assume capacity equals the busiest night in the data (226 rooms for the City Hotel). You can change it in the sidebar, and occupancy and RevPAR update.
 - **Booking date:** not in the data, so it is worked out as arrival date minus lead time.
 - **No-shows:** left out of occupancy, ADR and RevPAR.
