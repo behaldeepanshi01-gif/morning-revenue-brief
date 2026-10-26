@@ -3,6 +3,7 @@
 Run with:  streamlit run app.py
 """
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -23,15 +24,27 @@ daily_stay_table = st.cache_data(kpis.daily_stay_table)
 kpis_for_day = kpis.kpis_for_day
 
 
-def card(col, label, value, last_week, fmt, lower_is_better=False):
+def money(v):
+    return f"€{v:,.2f}"
+
+
+def signed_money(v):
+    """A change in money, with the sign before the currency: +€1.72 or −€1.05."""
+    return f"{'+' if v >= 0 else '−'}€{abs(v):,.2f}"
+
+
+def card(col, label, value, last_week, fmt, lower_is_better=False, fmt_delta=None):
     """Draw one KPI card with a 'vs same day last week' arrow."""
     delta = value - last_week
     col.metric(
         label,
         fmt(value),
-        delta=fmt(delta) if delta else None,
-        # Streamlit colours up=green by default; flip it for "bad when up" KPIs.
-        delta_color="inverse" if lower_is_better else "normal",
+        delta=(fmt_delta or fmt)(delta) if delta else None,
+        # Say the arrow and colour ourselves: Streamlit only recognises a plain
+        # "-" as negative, not the proper minus sign "−", so it would colour
+        # "−€1.05" green. Up is good, except for "bad when up" KPIs.
+        delta_arrow="up" if delta > 0 else "down",
+        delta_color="green" if (delta > 0) != lower_is_better else "red",
     )
 
 
@@ -118,8 +131,8 @@ st.divider()
 # --- Row 1: how full and how much money ---
 c1, c2, c3 = st.columns(3)
 card(c1, "Occupancy", now["occupancy"], before["occupancy"], lambda v: f"{v:.1%}")
-card(c2, "ADR", now["adr"], before["adr"], lambda v: f"€{v:,.2f}")
-card(c3, "RevPAR", now["revpar"], before["revpar"], lambda v: f"€{v:,.2f}")
+card(c2, "ADR", now["adr"], before["adr"], money, fmt_delta=signed_money)
+card(c3, "RevPAR", now["revpar"], before["revpar"], money, fmt_delta=signed_money)
 
 # --- Row 2: booking activity, counted in bookings ---
 c4, c5, _ = st.columns(3)
@@ -168,14 +181,28 @@ else:
              f"{'behind' if weak['diff'] < 0 else 'ahead of'} the {weak['last_year']} "
              f"booked at this point last year.")
 
-    chart = fwd_table[["on_books", "last_year"]].rename(
-        columns={"on_books": "On the books (this year)", "last_year": "Same night last year"})
-    st.line_chart(chart)
+    # Long format (one row per night per year) so Altair can draw two lines.
+    chart_data = (
+        fwd_table[["on_books", "last_year"]]
+        .rename(columns={"on_books": "This year", "last_year": "Same night last year"})
+        .rename_axis("Night").reset_index()
+        .melt(id_vars="Night", var_name="Year", value_name="Room nights")
+        .dropna()
+    )
+    chart = alt.Chart(chart_data).mark_line(point=True).encode(
+        # Dates in order, one label every 3 days, tilted so they never overlap.
+        x=alt.X("Night:T", title=None, sort="ascending",
+                axis=alt.Axis(format="%a %d %b", labelAngle=-45, tickCount={"interval": "day", "step": 3})),
+        y=alt.Y("Room nights:Q", title="Room nights", scale=alt.Scale(zero=False)),
+        color=alt.Color("Year:N", title=None, legend=alt.Legend(orient="top")),
+        tooltip=[alt.Tooltip("Night:T", format="%a %d %b"), "Year:N", "Room nights:Q"],
+    )
+    st.altair_chart(chart, width="stretch")
     with st.expander("Night-by-night table"):
         st.dataframe(
             fwd_table.rename(columns={"on_books": "On the books", "last_year": "Last year", "diff": "Difference"})
             .rename_axis("Night").style.format({"Last year": "{:.0f}", "Difference": "{:+.0f}"}, na_rep="n/a"),
-            use_container_width=True,
+            width="stretch",
         )
     # Last year's data is thin in 2015 (the file starts in July 2015).
     if (fwd_table.index - LAST_YEAR_SHIFT).year.min() <= 2015:

@@ -17,6 +17,14 @@ MODEL = "claude-haiku-4-5"  # small and cheap; plenty for a 5-line summary
 FULL = 0.90   # above this: never discount
 HEALTHY = 0.75  # below this: discounts / promotions / groups are fine
 
+# A percentage change only counts as a risk when the absolute change is
+# meaningful too - 40% more cancellations means little if it is 3 extra rooms.
+MIN_ROOM_NIGHTS = 20   # smallest change in room nights (over a day or a window)
+MIN_ONE_NIGHT = 5      # smallest change in rooms on a single night
+MIN_ADR_MOVE = 5       # smallest ADR move, in euros
+BIG_NIGHT_GAP = 15     # a future night this far behind last year outranks small swings
+MIN_NET_LOSS = 10      # smallest negative pickup (net room nights) worth flagging
+
 
 # ---------------------------------------------------------------------------
 # 1. RULE-BASED BRIEF (free, always works)
@@ -27,10 +35,13 @@ def _pct_change(now, before):
 
 
 def cancellations_high(now, before):
-    """True when cancellations are a problem: more room nights cancelled than
-    booked today, or cancelled room nights well above last week."""
+    """True when cancellations are a problem: cancellations clearly outran new
+    bookings, or cancelled room nights are well above last week (by more than
+    25% AND by a meaningful number of room nights)."""
     change = _pct_change(now["cancelled_room_nights"], before["cancelled_room_nights"])
-    return now["pickup"] < 0 or (change is not None and change > 25)
+    extra = now["cancelled_room_nights"] - before["cancelled_room_nights"]
+    return now["pickup"] <= -MIN_NET_LOSS or (
+        change is not None and change > 25 and extra >= MIN_ROOM_NIGHTS)
 
 
 def _risks(now, before, fwd=None):
@@ -50,8 +61,8 @@ def _risks(now, before, fwd=None):
 
     # --- Today versus last week ---
 
-    # Pickup is negative: more room nights cancelled than booked.
-    if now["pickup"] < 0:
+    # Pickup is clearly negative: more room nights cancelled than booked.
+    if now["pickup"] <= -MIN_NET_LOSS:
         risks.append((
             3 + abs(now["pickup"]) / 20,
             f"Cancellations outran new bookings: {now['pickup']:,} net room nights.",
@@ -60,7 +71,8 @@ def _risks(now, before, fwd=None):
 
     # Cancelled room nights well above last week.
     cancel_change = _pct_change(now["cancelled_room_nights"], before["cancelled_room_nights"])
-    if cancel_change is not None and cancel_change > 25:
+    cancel_extra = now["cancelled_room_nights"] - before["cancelled_room_nights"]
+    if cancel_change is not None and cancel_change > 25 and cancel_extra >= MIN_ROOM_NIGHTS:
         risks.append((
             2 + cancel_change / 50,
             f"Cancelled room nights are up {cancel_change:.0f}% on last week.",
@@ -69,13 +81,15 @@ def _risks(now, before, fwd=None):
 
     # Occupancy dropped.
     occ_drop = (before["occupancy"] - now["occupancy"]) * 100  # in points
-    if occ_drop > 3:
+    rooms_lost = before["rooms_occupied"] - now["rooms_occupied"]
+    if occ_drop > 3 and rooms_lost >= MIN_ONE_NIGHT:
         risks.append((2 + occ_drop / 5, f"Occupancy is down {occ_drop:.1f} points on last week.",
                       today_occ, None))
 
     # Booking pace is slower than last week.
     pace_change = _pct_change(now["new_room_nights"], before["new_room_nights"])
-    if pace_change is not None and pace_change < -25:
+    pace_drop = before["new_room_nights"] - now["new_room_nights"]
+    if pace_change is not None and pace_change < -25 and pace_drop >= MIN_ROOM_NIGHTS:
         risks.append((
             1.5 + abs(pace_change) / 100,
             f"New booking pace is down {abs(pace_change):.0f}% on last week.",
@@ -84,7 +98,7 @@ def _risks(now, before, fwd=None):
 
     # Price is slipping.
     adr_change = _pct_change(now["adr"], before["adr"])
-    if adr_change is not None and adr_change < -5:
+    if adr_change is not None and adr_change < -5 and before["adr"] - now["adr"] >= MIN_ADR_MOVE:
         risks.append((1 + abs(adr_change) / 10, f"ADR has slipped {abs(adr_change):.0f}% on last week.",
                       today_occ, None))
 
@@ -100,7 +114,8 @@ def _risks(now, before, fwd=None):
     if fwd:
         for key, label in (("next7", "next 7 days"), ("next30", "next 30 days")):
             w = fwd[key]
-            if w["pct"] is not None and w["pct"] < -0.10:  # more than 10% behind last year
+            # more than 10% behind last year, by a meaningful number of room nights
+            if w["pct"] is not None and w["pct"] < -0.10 and -w["diff"] >= MIN_ROOM_NIGHTS:
                 behind = abs(w["pct"])
                 score = (2.5 if key == "next7" else 2) + behind * 100 / (20 if key == "next7" else 25)
                 risks.append((
@@ -112,10 +127,12 @@ def _risks(now, before, fwd=None):
 
         weak = fwd["weakest"]
         capacity = fwd["capacity"]
-        if weak["diff"] is not None and weak["diff"] <= -max(5, 0.05 * capacity):
+        if weak["diff"] is not None and weak["diff"] <= -MIN_ONE_NIGHT:
             night = pd.Timestamp(weak["date"])
+            # 15+ rooms behind last year on one night outranks small day-over-day swings.
+            base = 5 if weak["diff"] <= -BIG_NIGHT_GAP else 2
             risks.append((
-                2 + abs(weak["diff"]) / capacity * 10,
+                base + abs(weak["diff"]) / capacity * 10,
                 f"{night:%A %d %B} is the weakest upcoming night: {weak['on_books']} rooms on the books, "
                 f"{abs(weak['diff'])} behind last year.",
                 weak["occupancy"], f"{night:%a %d %b}",
@@ -228,7 +245,11 @@ rooms available. "weakest" is the upcoming night furthest behind last year.
 If a last_year figure is null, there is no comparison - do not make one up.
 
 The biggest risk (line 4) may be about today OR about future dates. Pick
-whichever matters most to a GM.
+whichever matters most to a GM. A percentage change is only a risk if the
+absolute change is meaningful too: at least 20 room nights over a day or a
+window, at least 5 rooms on a single night, at least 5 euros for ADR. A single
+upcoming night that is 15 or more rooms behind last year outranks small
+day-over-day swings.
 
 Rules for line 5 (the recommended action) - follow them strictly. They depend on
 how full the hotel is on the date the risk is about - today's occupancy if the
@@ -240,9 +261,9 @@ the risk is about the future - not on the change versus last week or last year:
 - Occupancy 75% to 90%: suggest a targeted action, such as focusing on the
   weakest channel or day. No across-the-board discounting.
 - Occupancy below 75%: discounts, promotions or group business are fine.
-- If cancellations are high (cancelled room nights more than 25% above last
-  week, or pickup below zero), also suggest a deposit or non-refundable rate
-  for long-lead bookings.
+- If cancellations are high (cancelled room nights more than 25% AND at least 20
+  room nights above last week, or pickup of -10 or worse), also suggest a
+  deposit or non-refundable rate for long-lead bookings.
 If line 5 is about a future date, name the date.
 
 Write exactly 5 short lines, plain English, readable in 30 seconds:

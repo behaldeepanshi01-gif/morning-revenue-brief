@@ -105,6 +105,7 @@ def kpis_for_day(day, df, stay_table, capacity):
     cancelled_room_nights = int(cancelled["nights"].sum())
 
     return {
+        "rooms_occupied": int(occupied),
         "occupancy": occupied / capacity,                       # share of rooms filled
         "adr": revenue / paying if paying else 0.0,             # revenue per PAYING room
         "revpar": revenue / capacity,                           # revenue per AVAILABLE room
