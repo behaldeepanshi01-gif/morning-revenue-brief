@@ -35,6 +35,18 @@ I checked one future night by hand from the raw rows (`check_future.py`): standi
 
 The data starts in July 2015 and 2015 is a much smaller sample, so comparisons against 2015 look better than they really are. The app shows a note when that happens, and starts on a 2017 date so the comparison is against 2016.
 
+## How it runs automatically
+
+Every morning the brief is also **emailed** to the GM: the five lines, the 7 and 30 day outlook, the weakest upcoming night and a link to the live app.
+
+- **Schedule:** a GitHub Actions workflow runs `send_brief.py` every day at **6:00 AM US Eastern**. (GitHub schedules in UTC, so it is set for both 10:00 and 11:00 UTC and only the run that lands on 6 AM Eastern goes ahead, which keeps it right through daylight saving.) There is also a **Run workflow** button on the repo's Actions tab for demos.
+- **Replay mode:** the data is history, not live, so each real day the email "replays" the next day of the data. The first run is for 15 Jul 2017, the next real day gives 16 Jul, and so on. The brief needs 30 days of data after the replay day, so it loops back to 15 Jul after 18 days. The email says it is a demo.
+- **Claude with a safety net:** the brief is written by Claude (`claude-haiku-4-5`). If the API call fails, the rule-based brief is sent instead, so the email always goes out.
+- **Secrets:** the API key and Gmail details are kept in GitHub's encrypted secrets (`ANTHROPIC_API_KEY`, `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`), never in the code. Gmail needs an [app password](https://support.google.com/accounts/answer/185833), not your normal password.
+- **Try it without sending:** `python send_brief.py --dry-run` prints the email instead of sending it.
+
+**Connecting it to a real hotel:** most property management systems (PMS) can export reservations on a schedule. Point `kpis.py` at that nightly export instead of the Kaggle file. The columns needed are arrival date, number of nights, booking date, cancellation date, status, room rate and hotel. Then drop the replay logic so the brief is simply for today's date. Everything else (KPIs, outlook, brief, email, schedule) stays the same.
+
 ## How I checked the numbers
 
 I recalculated one day by hand, straight from the raw booking rows and without using the app's code: **City Hotel, 15 August 2016**.

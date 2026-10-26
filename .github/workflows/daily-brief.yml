@@ -1,0 +1,50 @@
+name: Daily Morning Brief
+
+on:
+  schedule:
+    # GitHub cron runs in UTC, but 6:00 AM US Eastern is 10:00 UTC in summer
+    # (EDT) and 11:00 UTC in winter (EST). Run at both, and let the first step
+    # below let only the one that lands on 6 AM Eastern continue.
+    - cron: "0 10 * * *"
+    - cron: "0 11 * * *"
+  workflow_dispatch:   # the "Run workflow" button, for demos
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Is it 6 AM Eastern? (manual runs always go ahead)
+        id: gate
+        run: |
+          hour=$(TZ=America/New_York date +%H)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$hour" = "06" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "It is $hour:xx Eastern, not 6 AM - skipping."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-email.txt
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: pip install -r requirements-email.txt
+
+      - name: Send the Morning Brief
+        if: steps.gate.outputs.run == 'true'
+        env:
+          # Repository secrets: Settings > Secrets and variables > Actions
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          # Optional repository variable: the live app's URL, linked in the email
+          APP_URL: ${{ vars.APP_URL }}
+        run: python send_brief.py
