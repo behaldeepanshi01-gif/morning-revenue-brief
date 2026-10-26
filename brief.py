@@ -1,12 +1,15 @@
 """Morning Brief writers. No Streamlit in here, so it is easy to test.
 
-Both writers take the same two inputs - today's KPIs and last week's KPIs
-(the dicts produced by kpis_for_day in app.py) - and return exactly 5 lines.
+Both writers take today's KPIs, last week's KPIs (the dicts produced by
+kpis_for_day in app.py) and the forward-looking summary (forward.py), and
+return exactly 5 lines.
 """
 
 import json
 import os
 import re
+
+import pandas as pd
 
 MODEL = "claude-haiku-4-5"  # small and cheap; plenty for a 5-line summary
 
@@ -30,21 +33,29 @@ def cancellations_high(now, before):
     return now["pickup"] < 0 or (change is not None and change > 25)
 
 
-def _risks(now, before):
+def _risks(now, before, fwd=None):
     """List the things that look worrying, each with a severity score.
 
     The biggest score wins and becomes 'the biggest risk'. The scores are
     rough - they only need to rank the risks against each other.
-    Returns a list of (score, risk sentence). The ACTION is chosen separately,
-    by how full the hotel is (see recommended_action).
+
+    Returns a list of (score, risk sentence, occupancy, target):
+    - occupancy: how full the hotel is on the date(s) the risk is about. It
+      decides which kind of action is allowed (see recommended_action).
+    - target: a label for future dates ("Fri 19 Aug"), or None when the risk
+      is about today.
     """
     risks = []
+    today_occ = now["occupancy"]
+
+    # --- Today versus last week ---
 
     # Pickup is negative: more room nights cancelled than booked.
     if now["pickup"] < 0:
         risks.append((
             3 + abs(now["pickup"]) / 20,
             f"Cancellations outran new bookings: {now['pickup']:,} net room nights.",
+            today_occ, None,
         ))
 
     # Cancelled room nights well above last week.
@@ -53,12 +64,14 @@ def _risks(now, before):
         risks.append((
             2 + cancel_change / 50,
             f"Cancelled room nights are up {cancel_change:.0f}% on last week.",
+            today_occ, None,
         ))
 
     # Occupancy dropped.
     occ_drop = (before["occupancy"] - now["occupancy"]) * 100  # in points
     if occ_drop > 3:
-        risks.append((2 + occ_drop / 5, f"Occupancy is down {occ_drop:.1f} points on last week."))
+        risks.append((2 + occ_drop / 5, f"Occupancy is down {occ_drop:.1f} points on last week.",
+                      today_occ, None))
 
     # Booking pace is slower than last week.
     pace_change = _pct_change(now["new_room_nights"], before["new_room_nights"])
@@ -66,27 +79,54 @@ def _risks(now, before):
         risks.append((
             1.5 + abs(pace_change) / 100,
             f"New booking pace is down {abs(pace_change):.0f}% on last week.",
+            today_occ, None,
         ))
 
     # Price is slipping.
     adr_change = _pct_change(now["adr"], before["adr"])
     if adr_change is not None and adr_change < -5:
-        risks.append((1 + abs(adr_change) / 10, f"ADR has slipped {abs(adr_change):.0f}% on last week."))
+        risks.append((1 + abs(adr_change) / 10, f"ADR has slipped {abs(adr_change):.0f}% on last week.",
+                      today_occ, None))
 
     # Nearly full: the risk is selling too cheap, not selling too little.
     if now["occupancy"] > 0.95:
         risks.append((
             1,
             f"The hotel is almost full ({now['occupancy']:.0%}), so there is little room for error.",
+            today_occ, None,
         ))
+
+    # --- Future dates versus the same dates last year ---
+    if fwd:
+        for key, label in (("next7", "next 7 days"), ("next30", "next 30 days")):
+            w = fwd[key]
+            if w["pct"] is not None and w["pct"] < -0.10:  # more than 10% behind last year
+                behind = abs(w["pct"])
+                score = (2.5 if key == "next7" else 2) + behind * 100 / (20 if key == "next7" else 25)
+                risks.append((
+                    score,
+                    f"The {label} are {behind:.0%} behind last year at the same point "
+                    f"({w['on_books_compared']:,} room nights on the books vs {w['last_year']:,}).",
+                    w["occupancy"], f"the {label}",
+                ))
+
+        weak = fwd["weakest"]
+        capacity = fwd["capacity"]
+        if weak["diff"] is not None and weak["diff"] <= -max(5, 0.05 * capacity):
+            night = pd.Timestamp(weak["date"])
+            risks.append((
+                2 + abs(weak["diff"]) / capacity * 10,
+                f"{night:%A %d %B} is the weakest upcoming night: {weak['on_books']} rooms on the books, "
+                f"{abs(weak['diff'])} behind last year.",
+                weak["occupancy"], f"{night:%a %d %b}",
+            ))
 
     return risks
 
 
-def recommended_action(now, before):
-    """One action, chosen by how full the hotel is - not by last week's change."""
-    occ = now["occupancy"]
-
+def recommended_action(occ, now, before, target=None):
+    """One action, chosen by how full the hotel is on the date the risk is
+    about (`occ`) - not by last week's change."""
     if occ > FULL:
         # Nearly full: protect price and the last rooms. Never discount.
         action = ("Hold or raise rates, add minimum length-of-stay restrictions "
@@ -100,6 +140,10 @@ def recommended_action(now, before):
         action = ("Stimulate demand with a promotion or discounted rate, "
                   "and go after group business to fill the empty rooms.")
 
+    # For a future date, say which date and how full it already is.
+    if target:
+        action = f"For {target} ({occ:.0%} on the books): {action[0].lower()}{action[1:]}"
+
     # High cancellations get an extra protection, whatever the occupancy.
     if cancellations_high(now, before):
         action += (" Cancellations are high, so require a deposit or offer a "
@@ -107,7 +151,7 @@ def recommended_action(now, before):
     return action
 
 
-def rule_based_brief(now, before, hotel, day):
+def rule_based_brief(now, before, hotel, day, fwd=None):
     """Write 5 plain-English lines from simple rules."""
     occ_pts = (now["occupancy"] - before["occupancy"]) * 100
     revpar_change = _pct_change(now["revpar"], before["revpar"])
@@ -122,19 +166,27 @@ def rule_based_brief(now, before, hotel, day):
     line2 = (f"Versus last week: occupancy {'up' if occ_pts >= 0 else 'down'} "
              f"{abs(occ_pts):.1f} points, {revpar_txt}.")
 
-    # Line 3: booking activity.
+    # Line 3: booking activity today, plus the 7-day outlook.
     line3 = (f"Pickup: {now['new_bookings']} new bookings ({now['new_room_nights']:,} room nights) "
              f"against {now['cancellations']} cancellations ({now['cancelled_room_nights']:,} room nights), "
              f"net {now['pickup']:+,} room nights (last week {before['pickup']:+,}).")
+    if fwd:
+        w = fwd["next7"]
+        if w["pct"] is not None:
+            line3 += (f" Next 7 days: {w['on_books']:,} room nights on the books, "
+                      f"{abs(w['pct']):.0%} {'ahead of' if w['pct'] >= 0 else 'behind'} last year.")
+        else:
+            line3 += f" Next 7 days: {w['on_books']:,} room nights on the books (no last-year comparison)."
 
     # Lines 4 and 5: biggest risk and what to do about it.
-    risks = _risks(now, before)
+    risks = _risks(now, before, fwd)
     if risks:
-        _, risk_text = max(risks)  # highest score wins
+        _, risk_text, occ, target = max(risks, key=lambda r: r[0])  # highest score wins
         line4 = f"Biggest risk: {risk_text}"
     else:
-        line4 = "Biggest risk: nothing stands out versus last week."
-    line5 = f"Recommended action: {recommended_action(now, before)}"
+        occ, target = now["occupancy"], None
+        line4 = "Biggest risk: nothing stands out versus last week or last year."
+    line5 = f"Recommended action: {recommended_action(occ, now, before, target)}"
 
     return [line1, line2, line3, line4, line5]
 
@@ -164,12 +216,24 @@ Hotel: {hotel}
 Date: {day}
 Today's KPIs: {now}
 Same weekday last week: {before}
+Forward look (rooms on the books for upcoming nights vs the same nights last
+year at the same lead time): {fwd}
 
 Notes: occupancy is a fraction (0.9 = 90%); ADR and RevPAR are in euros;
-pickup = new room nights minus cancelled room nights.
+pickup = new room nights minus cancelled room nights. In the forward look,
+"on_books" is room nights booked (and not cancelled) as of today, "last_year"
+is the same figure for the same weekdays a year earlier at the same lead time,
+"diff" is on_books minus last_year, and "occupancy" is on_books divided by
+rooms available. "weakest" is the upcoming night furthest behind last year.
+If a last_year figure is null, there is no comparison - do not make one up.
+
+The biggest risk (line 4) may be about today OR about future dates. Pick
+whichever matters most to a GM.
 
 Rules for line 5 (the recommended action) - follow them strictly. They depend on
-today's occupancy, not on the change versus last week:
+how full the hotel is on the date the risk is about - today's occupancy if the
+risk is about today, or the forward-look occupancy for that night or window if
+the risk is about the future - not on the change versus last week or last year:
 - Occupancy above 90%: NEVER suggest discounts, promotions or lower rates.
   Suggest holding or raising rates, adding length-of-stay restrictions, and
   protecting the last rooms.
@@ -179,17 +243,18 @@ today's occupancy, not on the change versus last week:
 - If cancellations are high (cancelled room nights more than 25% above last
   week, or pickup below zero), also suggest a deposit or non-refundable rate
   for long-lead bookings.
+If line 5 is about a future date, name the date.
 
 Write exactly 5 short lines, plain English, readable in 30 seconds:
 1. How today did.
 2. How it compares to the same day last week.
-3. Booking activity (pickup).
-4. The biggest risk.
+3. Booking activity (pickup), and how the next 7 days look versus last year.
+4. The biggest risk (today or upcoming).
 5. One recommended action.
 Output only the 5 lines: no markdown, no bullets, no numbering, no blank lines."""
 
 
-def claude_brief(now, before, hotel, day, api_key):
+def claude_brief(now, before, hotel, day, api_key, fwd=None):
     """Ask Claude for the 5 lines. Raises an exception if anything goes wrong,
     so the caller can fall back to the rule-based brief."""
     import anthropic  # imported here so the app still runs without the package
@@ -197,10 +262,11 @@ def claude_brief(now, before, hotel, day, api_key):
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
-        max_tokens=500,
+        max_tokens=600,
         messages=[{"role": "user", "content": PROMPT.format(
             hotel=hotel, day=f"{day:%A %d %B %Y}",
             now=json.dumps(now), before=json.dumps(before),
+            fwd=json.dumps(fwd) if fwd else "not available",
         )}],
     )
     if response.stop_reason != "end_turn":
@@ -212,9 +278,16 @@ def claude_brief(now, before, hotel, day, api_key):
         raise RuntimeError(f"Expected 5 lines, got {len(lines)}")
 
     # Safety net: even if the model ignores the prompt, a nearly full hotel
-    # must never be told to discount. Raising an error triggers the fallback.
-    if now["occupancy"] > FULL and re.search(
-            r"discount|promotion|promo|lower (the )?rate|cut (the )?rate|reduce (the )?rate|cheaper",
+    # must never be told to discount. We don't know which date Claude's action
+    # is about, so be strict: if today OR any forward window/night is above
+    # 90%, discount words in line 5 are rejected. Raising an error triggers
+    # the fallback to the rule-based brief.
+    occupancies = [now["occupancy"]]
+    if fwd:
+        occupancies += [fwd["next7"]["occupancy"], fwd["next30"]["occupancy"],
+                        fwd["weakest"]["occupancy"]]
+    if max(occupancies) > FULL and re.search(
+            r"discount|promotion|promo|lower (the )?rate|cut (the )?rate|reduce (the )?rate|cheaper",
             lines[4], re.I):
         raise RuntimeError("Claude suggested discounting at >90% occupancy")
     return lines

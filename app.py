@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from brief import claude_brief, get_api_key, rule_based_brief
+from forward import LAST_YEAR_SHIFT, forward_summary, forward_table
 
 st.set_page_config(page_title="Morning Revenue Brief", layout="wide")
 
@@ -157,7 +158,7 @@ capacity = st.sidebar.number_input(
 first_day = hotel_df["arrival_date"].min() + pd.Timedelta(days=7)
 last_day = hotel_df["arrival_date"].max()
 today = pd.Timestamp(st.sidebar.date_input(
-    "Today", value=pd.Timestamp("2016-08-15"), min_value=first_day, max_value=last_day,
+    "Today", value=pd.Timestamp("2017-07-15"), min_value=first_day, max_value=last_day,
 ))
 last_week = today - pd.Timedelta(days=7)
 
@@ -166,11 +167,22 @@ st.caption(f"{hotel} · {today:%A, %d %B %Y} · compared with {last_week:%A, %d 
 now = kpis_for_day(today, hotel_df, stay_table, capacity)
 before = kpis_for_day(last_week, hotel_df, stay_table, capacity)
 
+# --- Looking ahead: rooms on the books for the next 30 nights (see forward.py) ---
+@st.cache_data(show_spinner="Counting rooms on the books...")
+def forward_for(_hotel_df, hotel, day, capacity):
+    # _hotel_df starts with an underscore so Streamlit doesn't hash 80k rows;
+    # hotel + day identify it instead.
+    table = forward_table(_hotel_df, day)
+    return table, forward_summary(table, capacity)
+
+
+fwd_table, fwd = forward_for(hotel_df, hotel, today, capacity)
+
 # --- Morning Brief: 5 plain-English lines at the top ---
 @st.cache_data(show_spinner="Asking Claude...")
-def ai_brief(now, before, hotel, day, api_key):
+def ai_brief(now, before, hotel, day, api_key, fwd):
     # Cached so changing nothing doesn't re-bill the API on every page refresh.
-    return claude_brief(now, before, hotel, day, api_key)
+    return claude_brief(now, before, hotel, day, api_key, fwd)
 
 
 def secrets_or_none():
@@ -190,11 +202,11 @@ use_claude = st.sidebar.checkbox(
 lines, source = None, "Rule-based"
 if use_claude:
     try:
-        lines, source = ai_brief(now, before, hotel, today, api_key), "Written by Claude"
+        lines, source = ai_brief(now, before, hotel, today, api_key, fwd), "Written by Claude"
     except Exception as err:  # bad key, network, refusal, odd output...
         st.warning(f"Claude brief unavailable ({type(err).__name__}); showing the rule-based brief.")
 if lines is None:
-    lines = rule_based_brief(now, before, hotel, today)
+    lines = rule_based_brief(now, before, hotel, today, fwd)
 
 st.subheader("Morning Brief")
 for line in lines:
@@ -223,6 +235,53 @@ card(c8, "Pickup (net room nights)", now["pickup"], before["pickup"], lambda v: 
 
 st.caption("Arrows show change versus the same weekday last week. "
            "Pickup = new room nights - cancelled room nights.")
+
+# --- Looking ahead: rooms on the books vs the same nights last year ---
+st.divider()
+st.subheader("Looking ahead: rooms on the books")
+if fwd is None:
+    st.info("The data has no bookings after this date, so there is nothing to look ahead at.")
+else:
+    def ahead_card(col, label, w):
+        """Rooms on the books for a window, with the gap versus last year."""
+        if w["diff"] is None:
+            col.metric(label, f"{w['on_books']:,}", help="No last-year data for these dates.")
+        else:
+            pct = f" ({w['pct']:+.1%})" if w["pct"] is not None else ""
+            col.metric(label, f"{w['on_books']:,}", delta=f"{w['diff']:+,}{pct} vs last year")
+
+    a1, a2 = st.columns(2)
+    ahead_card(a1, f"Next {fwd['next7']['days']} days (room nights)", fwd["next7"])
+    ahead_card(a2, f"Next {fwd['next30']['days']} days (room nights)", fwd["next30"])
+
+    weak = fwd["weakest"]
+    weak_night = pd.Timestamp(weak["date"])
+    if weak["diff"] is None:
+        st.warning(f"Emptiest upcoming night: {weak_night:%a %d %b} with {weak['on_books']} rooms "
+                   f"on the books ({weak['occupancy']:.0%}). No last-year figure to compare.")
+    else:
+        # Only a real warning when the night is actually behind last year.
+        show = st.warning if weak["diff"] < 0 else st.info
+        show(f"Weakest upcoming night: {weak_night:%a %d %b} with {weak['on_books']} rooms on the "
+             f"books ({weak['occupancy']:.0%}), {abs(weak['diff'])} "
+             f"{'behind' if weak['diff'] < 0 else 'ahead of'} the {weak['last_year']} "
+             f"booked at this point last year.")
+
+    chart = fwd_table[["on_books", "last_year"]].rename(
+        columns={"on_books": "On the books (this year)", "last_year": "Same night last year"})
+    st.line_chart(chart)
+    with st.expander("Night-by-night table"):
+        st.dataframe(
+            fwd_table.rename(columns={"on_books": "On the books", "last_year": "Last year", "diff": "Difference"})
+            .rename_axis("Night").style.format({"Last year": "{:.0f}", "Difference": "{:+.0f}"}, na_rep="n/a"),
+            use_container_width=True,
+        )
+    # Last year's data is thin in 2015 (the file starts in July 2015).
+    if (fwd_table.index - LAST_YEAR_SHIFT).year.min() <= 2015:
+        st.caption("Last year's data is a smaller sample, so year-over-year gaps look larger than they are.")
+    st.caption("Rooms on the books = bookings made on or before today and not cancelled by today. "
+               "Last year = the same weekday 364 days earlier, counted as of that day's morning, "
+               "so both years have the same lead time. The weakest night is the one furthest behind last year.")
 
 # --- Data-quality note ---
 st.sidebar.markdown("---")

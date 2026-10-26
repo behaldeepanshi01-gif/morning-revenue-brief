@@ -25,6 +25,16 @@ Every morning a GM wants to know three things: how did we do, how does that comp
 
 Optional: Claude can write the brief when an API key is set. The rule-based brief works without one. If the key is missing or the call fails, the app quietly falls back to the rule-based version.
 
+## Looking ahead
+
+Below the KPI cards, the app shows **rooms on the books** for the next 7 and 30 nights: bookings made on or before today that haven't been cancelled by today. Each is compared with the same nights last year **at the same lead time**, meaning last year's figure is counted as it stood on the same morning a year earlier. "Last year" means the same weekday, 364 days back, so a Saturday is compared with a Saturday.
+
+It flags the **weakest upcoming night** (the one furthest behind last year), and the Morning Brief can name it as the biggest risk, with the action chosen by how full that night already is.
+
+I checked one future night by hand from the raw rows (`check_future.py`): standing on Sat 15 Jul 2017, the City Hotel had **219** rooms on the books for Sat 22 Jul 2017 against **214** for Sat 23 Jul 2016 at the same point, a gap of +5. The app shows the same numbers.
+
+The data starts in July 2015 and 2015 is a much smaller sample, so comparisons against 2015 look better than they really are. The app shows a note when that happens, and starts on a 2017 date so the comparison is against 2016.
+
 ## How I checked the numbers
 
 I recalculated one day by hand, straight from the raw booking rows and without using the app's code: **City Hotel, 15 August 2016**.
