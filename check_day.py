@@ -3,7 +3,7 @@
 import pandas as pd
 
 DAY = pd.Timestamp("2016-08-15")
-raw = pd.read_csv("hotel_bookings.csv")
+raw = pd.read_csv("hotel_bookings.csv.gz")
 print("raw rows:", len(raw))
 print(f"removed everywhere: ADR>1000 -> {(raw.adr > 1000).sum()}  (ADR<=0 rows are kept)")
 d = raw[(raw.adr <= 1000) & (raw.hotel == "City Hotel")].copy()

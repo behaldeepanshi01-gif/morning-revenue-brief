@@ -5,5 +5,5 @@ venv/
 .streamlit/secrets.toml
 .env
 .DS_Store
-# Raw data stays local (large file); keep it next to app.py
+# Raw CSV stays local; the compressed hotel_bookings.csv.gz is what gets committed
 hotel_bookings.csv

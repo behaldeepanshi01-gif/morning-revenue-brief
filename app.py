@@ -17,7 +17,7 @@ MAX_ADR = 1000  # ADR above this is a data error and removed everywhere
 
 @st.cache_data  # only runs once, then Streamlit remembers the result
 def load_data():
-    df = pd.read_csv("hotel_bookings.csv")
+    df = pd.read_csv("hotel_bookings.csv.gz")
 
     # Data cleaning: ADR above MAX_ADR is a data error (the file has a 5,400
     # entry), so those rows are removed everywhere. We keep a count so the
