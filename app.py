@@ -6,6 +6,8 @@ Run with:  streamlit run app.py
 import pandas as pd
 import streamlit as st
 
+from brief import claude_brief, get_api_key, rule_based_brief
+
 st.set_page_config(page_title="Morning Revenue Brief", layout="wide")
 
 
@@ -163,6 +165,42 @@ st.caption(f"{hotel} · {today:%A, %d %B %Y} · compared with {last_week:%A, %d 
 
 now = kpis_for_day(today, hotel_df, stay_table, capacity)
 before = kpis_for_day(last_week, hotel_df, stay_table, capacity)
+
+# --- Morning Brief: 5 plain-English lines at the top ---
+@st.cache_data(show_spinner="Asking Claude...")
+def ai_brief(now, before, hotel, day, api_key):
+    # Cached so changing nothing doesn't re-bill the API on every page refresh.
+    return claude_brief(now, before, hotel, day, api_key)
+
+
+def secrets_or_none():
+    try:
+        return st.secrets
+    except Exception:  # no secrets file - that's fine
+        return None
+
+
+api_key = get_api_key(secrets_or_none())
+use_claude = st.sidebar.checkbox(
+    "Write the brief with Claude", value=False, disabled=not api_key,
+    help="Needs ANTHROPIC_API_KEY (environment variable or .streamlit/secrets.toml)."
+    if not api_key else "Uses your API key; each new date/hotel is one API call.",
+)
+
+lines, source = None, "Rule-based"
+if use_claude:
+    try:
+        lines, source = ai_brief(now, before, hotel, today, api_key), "Written by Claude"
+    except Exception as err:  # bad key, network, refusal, odd output...
+        st.warning(f"Claude brief unavailable ({type(err).__name__}); showing the rule-based brief.")
+if lines is None:
+    lines = rule_based_brief(now, before, hotel, today)
+
+st.subheader("Morning Brief")
+for line in lines:
+    st.markdown(f"- {line}")
+st.caption(source)
+st.divider()
 
 # --- Row 1: how full and how much money ---
 c1, c2, c3 = st.columns(3)
